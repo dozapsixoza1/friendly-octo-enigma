@@ -22,7 +22,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
-# каталог магазина: id -> (название, цена в Stars)
 SHOP = {
     "prefix": ("Префикс в чате", 50),
     "title": ("Название чата", 80),
@@ -63,7 +62,6 @@ async def test_invoice(callback):
 
 
 async def send_stars_invoice(chat_id: int, payload_id: str, title: str, stars: int):
-    # currency "XTR" = Telegram Stars, provider_token для Stars всегда пустая строка
     await bot.send_invoice(
         chat_id=chat_id,
         title=title,
@@ -87,7 +85,6 @@ async def on_paid(message: Message):
     if payload in SHOP:
         name = SHOP[payload][0]
         await message.answer(f"Оплачено ⭐ {stars} — «{name}» применено к чату.")
-        # тут вызываешь реальное действие: смена префикса/названия/бан и т.д.
     else:
         await message.answer(f"Оплата на ⭐ {stars} прошла успешно.")
 
@@ -111,8 +108,6 @@ async def on_webapp_data(message: Message):
         await send_stars_invoice(message.chat.id, item_id, name, price)
         return
 
-    # события и модерация — здесь дергаешь методы бота над чатом:
-    # bot.restrict_chat_member / bot.ban_chat_member / свою игровую логику и т.п.
     handlers = {
         "event_777": "Запускаю ивент 777 🎰",
         "event_spam3": "Запускаю ивент «Перебив сообщений» ⚡",
