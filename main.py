@@ -42,11 +42,11 @@ from aiogram.types import (
 # ============================================================
 
 BOT_TOKEN = "8650738832:AAEd6RIeS-lDFJH99t3KkjE_jymKiIS7aQE"
-WEBAPP_URL = "https://otdelapp.vercel.app/".rstrip("/")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").rstrip("/")
 MASTER_OWNER_ID = 76222784
 DEVELOPER_ID = 8302336447
 WEB_HOST = "0.0.0.0"
-WEB_PORT = 8080
+WEB_PORT = int(os.getenv("PORT", os.getenv("WEB_PORT", "8080")))
 DB_PATH = "otdel.db"
 STATIC_DIR = Path(__file__).parent
 
@@ -54,6 +54,8 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 if not MASTER_OWNER_ID:
     raise RuntimeError("MASTER_OWNER_ID is not set")
+if not WEBAPP_URL:
+    raise RuntimeError("WEBAPP_URL is not set. Set it to the HTTPS URL of this Python server.")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("otdel")
