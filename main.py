@@ -3,6 +3,7 @@ import json
 import logging
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import (
@@ -19,7 +20,7 @@ WEBAPP_URL = "https://otdelapp.vercel.app/"
 
 logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 SHOP = {
@@ -125,7 +126,13 @@ async def on_webapp_data(message: Message):
 
 
 async def main():
-    await dp.start_polling(bot)
+    await bot.delete_webhook(drop_pending_updates=True)
+    logging.info("Webhook сброшен, запускаю polling")
+    try:
+        await dp.start_polling(bot)
+    except Exception:
+        logging.exception("Polling упал с ошибкой")
+        raise
 
 
 if __name__ == "__main__":
