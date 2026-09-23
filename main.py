@@ -88,6 +88,16 @@ async def db():
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users(
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            photo_url TEXT,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS chats(
             chat_id INTEGER PRIMARY KEY,
             title TEXT NOT NULL,
@@ -138,6 +148,23 @@ async def init_db():
             tag TEXT DEFAULT ''
         );
         """)
+        await conn.commit()
+
+
+async def upsert_user(user: dict):
+    uid = int(user["id"])
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """INSERT INTO users(user_id,username,first_name,last_name,photo_url,first_seen,last_seen)
+               VALUES(?,?,?,?,?,?,?)
+               ON CONFLICT(user_id) DO UPDATE SET
+               username=excluded.username, first_name=excluded.first_name,
+               last_name=excluded.last_name, photo_url=excluded.photo_url,
+               last_seen=excluded.last_seen""",
+            (uid, user.get("username"), user.get("first_name"),
+             user.get("last_name"), user.get("photo_url"), now, now),
+        )
         await conn.commit()
 
 
@@ -201,16 +228,16 @@ async def remove_chat(chat_id: int):
 
 async def get_owner_chats(user_id: int):
     async with aiosqlite.connect(DB_PATH) as conn:
-        cur = await conn.execute(
-            "SELECT chat_id,title FROM chats WHERE owner_id=? ORDER BY title",
-            (user_id,),
-        )
+        if user_id in (MASTER_OWNER_ID, DEVELOPER_ID):
+            cur = await conn.execute("SELECT chat_id,title,owner_id FROM chats ORDER BY title")
+        else:
+            cur = await conn.execute("SELECT chat_id,title,owner_id FROM chats WHERE owner_id=? ORDER BY title", (user_id,))
         rows = await cur.fetchall()
-    return [{"id": str(r[0]), "name": r[1], "role": "Владелец"} for r in rows]
+    return [{"id": str(r[0]), "name": r[1], "role": ("Сервис" if user_id in (MASTER_OWNER_ID, DEVELOPER_ID) else "Владелец")} for r in rows]
 
 
 async def owns_chat(user_id: int, chat_id: int) -> bool:
-    if user_id == MASTER_OWNER_ID:
+    if user_id in (MASTER_OWNER_ID, DEVELOPER_ID):
         return True
     async with aiosqlite.connect(DB_PATH) as conn:
         cur = await conn.execute(
@@ -299,7 +326,9 @@ def validate_init_data(init_data: str) -> dict:
 async def web_user(request: web.Request):
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     try:
-        return validate_init_data(init_data)
+        auth = validate_init_data(init_data)
+        await upsert_user(auth["user"])
+        return auth
     except Exception as e:
         raise web.HTTPUnauthorized(text=str(e))
 
@@ -356,6 +385,8 @@ def code_kb(code: str):
 
 @dp.message(CommandStart())
 async def on_start(message: Message):
+    if message.from_user:
+        await upsert_user({"id":message.from_user.id,"username":message.from_user.username,"first_name":message.from_user.first_name,"last_name":message.from_user.last_name,"photo_url":None})
     if await has_access(message.from_user.id):
         rental = await get_rental(message.from_user.id)
         suffix = (
@@ -501,38 +532,54 @@ async def rental_callbacks(call):
 
 # ------------------------- Bot chat registration -------------------------
 
+async def register_chat_from_chat(chat, actor_id: int):
+    if chat.type not in ("group", "supergroup"):
+        return False, "Это не группа/супергруппа."
+    try:
+        admins = await bot.get_chat_administrators(chat.id)
+        creator = next((a for a in admins if a.status == ChatMemberStatus.CREATOR), None)
+        owner_id = creator.user.id if creator else actor_id
+    except Exception:
+        owner_id = actor_id
+    if actor_id not in (MASTER_OWNER_ID, DEVELOPER_ID) and not await has_access(owner_id):
+        return False, "У владельца группы нет активной аренды OTDEL."
+    me = await bot.get_me()
+    try:
+        member = await bot.get_chat_member(chat.id, me.id)
+        if member.status != ChatMemberStatus.ADMINISTRATOR:
+            return False, "Сделай OTDEL администратором группы."
+    except Exception:
+        return False, "Не удалось проверить права OTDEL в группе."
+    await save_chat(chat.id, chat.title or str(chat.id), owner_id)
+    return True, owner_id
+
+@dp.message(Command("connect"), F.chat.type.in_({"group", "supergroup"}))
+async def connect_chat(message: Message):
+    actor = message.from_user.id if message.from_user else 0
+    try:
+        member = await bot.get_chat_member(message.chat.id, actor)
+        if actor not in (MASTER_OWNER_ID, DEVELOPER_ID) and member.status not in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+            await message.reply("❌ Только администратор может подключить чат.")
+            return
+    except Exception:
+        await message.reply("❌ Не удалось проверить права администратора.")
+        return
+    ok, info = await register_chat_from_chat(message.chat, actor)
+    if ok:
+        await message.reply("✅ <b>Чат подключён к OTDEL.</b>\nОткрой /start у бота и зайди в Mini App.")
+    else:
+        await message.reply(f"❌ {info}")
+
 @dp.my_chat_member()
 async def on_bot_membership_change(event: ChatMemberUpdated):
-    old_status = event.old_chat_member.status
     new_status = event.new_chat_member.status
-
-    if old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED) and \
-       new_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
-
-        chat = event.chat
-        owner_id = None
-
+    if new_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
         try:
-            admins = await bot.get_chat_administrators(chat.id)
-            creator = next((a for a in admins if a.status == ChatMemberStatus.CREATOR), None)
-            owner_id = creator.user.id if creator else event.from_user.id
+            ok, info = await register_chat_from_chat(event.chat, event.from_user.id if event.from_user else 0)
+            if ok:
+                log.info("Chat registered: %s owner=%s", event.chat.id, info)
         except Exception:
-            owner_id = event.from_user.id
-
-        if not await has_access(owner_id):
-            try:
-                await bot.send_message(
-                    owner_id,
-                    "🔒 Бот добавлен в чат, но Mini App не активирован.\n"
-                    "Для подключения этого чата нужна активная аренда OTDEL."
-                )
-            except Exception:
-                pass
-            return
-
-        await save_chat(chat.id, chat.title or str(chat.id), owner_id)
-        log.info("Chat registered: %s owner=%s", chat.id, owner_id)
-
+            log.exception("Failed to register chat %s", event.chat.id)
     elif new_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
         await remove_chat(event.chat.id)
 
@@ -540,6 +587,8 @@ async def on_bot_membership_change(event: ChatMemberUpdated):
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def track_messages(message: Message):
     await remember_member(message)
+    if message.from_user:
+        await upsert_user({"id":message.from_user.id,"username":message.from_user.username,"first_name":message.from_user.first_name,"last_name":message.from_user.last_name,"photo_url":None})
 
 
 # ------------------------- Stars -------------------------
@@ -799,13 +848,26 @@ async def health_handler(request):
     return web.json_response({"ok": True, "service": "OTDEL"})
 
 
+@web.middleware
+async def cors_middleware(request, handler):
+    if request.method == "OPTIONS":
+        resp = web.Response(status=204)
+    else:
+        resp = await handler(request)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Telegram-Init-Data"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return resp
+
+
 def create_app():
-    app = web.Application()
+    app = web.Application(middlewares=[cors_middleware])
     app.router.add_get("/", index_handler)
     app.router.add_get("/welcome.png", welcome_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/api/bootstrap", api_bootstrap)
     app.router.add_post("/api/action", api_action)
+    app.router.add_route("OPTIONS", "/api/{tail:.*}", lambda request: web.Response(status=204))
     return app
 
 
